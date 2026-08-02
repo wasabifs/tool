@@ -64,9 +64,13 @@ service cloud.firestore {
 <button id="btnRun" disabled>正式搬遷(會寫入新資料庫)</button>
 
 <h2>4. 修正擁有者 uid(全部搬完後，最後做這步)</h2>
-<p style="font-size:13px;color:#aaa;">搬過去的文件，uid 欄位還是舊帳號的 uid，要改成新專案裡你目前的 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。</p>
+<p style="font-size:13px;color:#aaa;">搬過去的文件，uid 欄位還是舊帳號的 uid，要改成新專案裡實際在用的帳號 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。</p>
 <div>要修正的集合名稱(逗號分開):</div>
 <input type="text" id="uidFixCollections" value="recipes,ingredients,mealPlans,shoppingList">
+<div style="margin-top:12px;">來源 uid(目前資料庫裡存的值，登入後自動帶入，也可以手動改):</div>
+<input type="text" id="sourceUid" placeholder="登入舊專案後自動帶入">
+<div style="margin-top:12px;">目標 uid(要改成的值，登入後自動帶入，也可以手動改，例如貼上 Authentication 使用者清單裡正確帳號的 UID):</div>
+<input type="text" id="targetUid" placeholder="登入新專案後自動帶入">
 <br>
 <button id="btnFixUid" disabled>批次修正 uid</button>
 
@@ -125,6 +129,8 @@ document.getElementById('btnOldLogin').onclick = async () => {
     document.getElementById('oldStatus').textContent = '已登入: ' + oldUser.email + '（資料庫: ' + dbId + '）';
     document.getElementById('oldStatus').className = 'status ok';
     log('舊專案登入成功: ' + oldUser.email + '，資料庫 ID: ' + dbId);
+    const sourceUidInput = document.getElementById('sourceUid');
+    if (!sourceUidInput.value) sourceUidInput.value = oldUser.uid;
     checkReady();
   } catch (e) {
     document.getElementById('oldStatus').textContent = '登入失敗: ' + e.message;
@@ -147,6 +153,8 @@ document.getElementById('btnNewLogin').onclick = async () => {
     document.getElementById('newStatus').textContent = '已登入: ' + newUser.email + '（資料庫: ' + dbId + '）';
     document.getElementById('newStatus').className = 'status ok';
     log('新專案登入成功: ' + newUser.email + '，資料庫 ID: ' + dbId);
+    const targetUidInput = document.getElementById('targetUid');
+    if (!targetUidInput.value) targetUidInput.value = newUser.uid;
     checkReady();
   } catch (e) {
     document.getElementById('newStatus').textContent = '登入失敗: ' + e.message;
@@ -277,15 +285,18 @@ document.getElementById('btnRun').onclick = () => {
 
 document.getElementById('btnFixUid').onclick = async () => {
   const cols = document.getElementById('uidFixCollections').value.split(',').map(s => s.trim()).filter(Boolean);
+  const sourceUid = document.getElementById('sourceUid').value.trim();
+  const targetUid = document.getElementById('targetUid').value.trim();
   if (!cols.length) { log('沒有填集合名稱', 'err'); return; }
-  if (!confirm('確定要把這些集合裡 uid 是舊帳號的文件，改成新帳號的 uid 嗎？（' + cols.join('、') + '）')) return;
+  if (!sourceUid || !targetUid) { log('來源 uid / 目標 uid 不能空白', 'err'); return; }
+  if (!confirm('確定要把這些集合裡 uid 是 ' + sourceUid + ' 的文件，改成 ' + targetUid + ' 嗎？（' + cols.join('、') + '）')) return;
 
   document.getElementById('log').innerHTML = '';
-  log('=== 修正 uid: 舊 uid ' + oldUser.uid + ' → 新 uid ' + newUser.uid + ' ===');
+  log('=== 修正 uid: ' + sourceUid + ' → ' + targetUid + ' ===');
 
   for (const colName of cols) {
     try {
-      const q = query(collection(newDb, colName), where('uid', '==', oldUser.uid));
+      const q = query(collection(newDb, colName), where('uid', '==', sourceUid));
       const snap = await getDocs(q);
       log(colName + ': 找到 ' + snap.size + ' 份需要修正的文件');
       if (snap.size === 0) continue;
@@ -296,7 +307,7 @@ document.getElementById('btnFixUid').onclick = async () => {
         const batch = writeBatch(newDb);
         const chunk = docs.slice(i, i + 400);
         for (const d of chunk) {
-          batch.update(doc(newDb, colName, d.id), { uid: newUser.uid });
+          batch.update(doc(newDb, colName, d.id), { uid: targetUid });
         }
         await batch.commit();
         log('  ✓ ' + colName + ' 已修正 ' + Math.min(i + 400, docs.length) + ' / ' + docs.length, 'ok');
