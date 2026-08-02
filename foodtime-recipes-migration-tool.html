@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>foodtime recipes 搬遷小工具</title>
+<style>
+  body { font-family: -apple-system, "PingFang TC", sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; background:#111; color:#eee; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #444; padding-bottom: 6px; }
+  textarea { width: 100%; height: 90px; background:#1c1c1c; color:#eee; border:1px solid #444; border-radius:6px; padding:8px; font-family: monospace; font-size: 12px; box-sizing: border-box; }
+  input[type=text] { width: 100%; background:#1c1c1c; color:#eee; border:1px solid #444; border-radius:6px; padding:8px; box-sizing: border-box; }
+  button { background:#4a7dff; color:white; border:none; padding:10px 16px; border-radius:6px; cursor:pointer; font-size:14px; margin-top:8px; margin-right:8px; }
+  button:disabled { background:#555; cursor:not-allowed; }
+  .status { font-size: 13px; margin-top: 6px; }
+  .ok { color: #6fdc8c; }
+  .err { color: #ff7b7b; }
+  #log { background:#000; color:#9be89b; padding:12px; height:320px; overflow-y:auto; font-family: monospace; font-size:12px; white-space: pre-wrap; border-radius:6px; margin-top:10px; }
+  .note { background:#2a2a15; border:1px solid #665; padding:10px; border-radius:6px; font-size:13px; margin:10px 0; }
+</style>
+</head>
+<body>
+
+<h1>foodtime recipes 搬遷小工具</h1>
+<p>只做一件事:把舊專案 <code>recipes</code> 集合的文件,搬到新專案,途中把 <code>images</code> 陣列裡的 base64 圖片改存到 Firebase Storage,欄位換成網址。全程在你的瀏覽器裡執行,不會把資料傳到別的地方。</p>
+
+<div class="note">
+  用之前確認一下:新專案的 Firestore 規則要先暫時放寬(你目前貼給我的規則是「全部拒絕」,要先改成下面這樣,搬完之後記得換回嚴格版本):
+  <pre style="white-space:pre-wrap;">rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}</pre>
+  Storage 的規則也要暫時允許已登入使用者寫入,可以比照設定。
+</div>
+
+<h2>1. 貼上舊專案(來源)的 firebaseConfig</h2>
+<textarea id="oldConfig" placeholder='{ "apiKey": "...", "projectId": "...", ... }'></textarea>
+<div>資料庫 ID(如果不是 (default),填實際的資料庫 ID,例如 ai-studio-56c2a56f-...):</div>
+<input type="text" id="oldDbId" value="(default)">
+<br>
+<button id="btnOldLogin">登入舊專案(Google)</button>
+<span id="oldStatus" class="status">尚未登入</span>
+
+<h2>2. 貼上新專案(目標)的 firebaseConfig</h2>
+<textarea id="newConfig" placeholder='{ "apiKey": "...", "projectId": "shareapp-3607e", ... }'></textarea>
+<div>資料庫 ID(填 foodtimer):</div>
+<input type="text" id="newDbId" value="foodtimer">
+<br>
+<button id="btnNewLogin">登入新專案(Google)</button>
+<span id="newStatus" class="status">尚未登入</span>
+
+<h2>3. 執行搬遷</h2>
+<div>集合名稱:</div>
+<input type="text" id="collectionName" value="recipes">
+<div style="margin-top:12px;">圖片最長邊(超過會等比例縮小,單位 px):</div>
+<input type="text" id="maxDim" value="1600">
+<div style="margin-top:12px;">JPEG 壓縮品質(0.1~1,越低檔案越小、畫質越差,建議 0.7~0.85):</div>
+<input type="text" id="jpegQuality" value="0.8">
+<br>
+<button id="btnDryRun">先試跑(不寫入,只看結果)</button>
+<button id="btnRun" disabled>正式搬遷(會寫入新資料庫)</button>
+
+<div id="log"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js"></script>
+
+<script>
+let oldApp, newApp, oldDb, newDb, oldUser, newUser, oldStorage_unused, newStorage;
+
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function parseConfig(id) {
+  let raw = document.getElementById(id).value.trim();
+  // 如果貼的是整行 "const firebaseConfig = { ... };" 這種程式碼，
+  // 只取第一個 { 到最後一個 } 之間的內容，把宣告語法去掉
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    raw = raw.slice(start, end + 1);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    try {
+      return Function('"use strict"; return (' + raw + ')')();
+    } catch (e2) {
+      throw new Error('config 格式看不懂，請確認貼的內容包含完整的 { ... } 物件');
+    }
+  }
+}
+
+document.getElementById('btnOldLogin').onclick = async () => {
+  try {
+    const cfg = parseConfig('oldConfig');
+    oldApp = firebase.initializeApp(cfg, 'oldApp');
+    const dbId = document.getElementById('oldDbId').value.trim() || '(default)';
+    oldDb = dbId === '(default)' ? oldApp.firestore() : oldApp.firestore(dbId);
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const result = await oldApp.auth().signInWithPopup(provider);
+    oldUser = result.user;
+    document.getElementById('oldStatus').textContent = '已登入: ' + oldUser.email + ' (uid: ' + oldUser.uid + ')';
+    document.getElementById('oldStatus').className = 'status ok';
+    log('舊專案登入成功: ' + oldUser.email);
+    checkReady();
+  } catch (e) {
+    document.getElementById('oldStatus').textContent = '登入失敗: ' + e.message;
+    document.getElementById('oldStatus').className = 'status err';
+    log('舊專案登入失敗: ' + e.message, 'err');
+  }
+};
+
+document.getElementById('btnNewLogin').onclick = async () => {
+  try {
+    const cfg = parseConfig('newConfig');
+    newApp = firebase.initializeApp(cfg, 'newApp');
+    const dbId = document.getElementById('newDbId').value.trim() || '(default)';
+    newDb = dbId === '(default)' ? newApp.firestore() : newApp.firestore(dbId);
+    newStorage = newApp.storage();
+    const provider = new firebase.auth.GoogleAuthProvider();
+    const result = await newApp.auth().signInWithPopup(provider);
+    newUser = result.user;
+    document.getElementById('newStatus').textContent = '已登入: ' + newUser.email + ' (uid: ' + newUser.uid + ')';
+    document.getElementById('newStatus').className = 'status ok';
+    log('新專案登入成功: ' + newUser.email);
+    checkReady();
+  } catch (e) {
+    document.getElementById('newStatus').textContent = '登入失敗: ' + e.message;
+    document.getElementById('newStatus').className = 'status err';
+    log('新專案登入失敗: ' + e.message, 'err');
+  }
+};
+
+function checkReady() {
+  document.getElementById('btnRun').disabled = !(oldUser && newUser);
+}
+
+function isBase64Image(str) {
+  return typeof str === 'string' && str.startsWith('data:image');
+}
+
+function compressImage(base64Str, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        if (width >= height) {
+          height = Math.round(height * (maxDim / width));
+          width = maxDim;
+        } else {
+          width = Math.round(width * (maxDim / height));
+          height = maxDim;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error('圖片壓縮失敗（canvas 轉換為空）'));
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = () => reject(new Error('圖片讀取失敗，來源資料可能不是有效的圖片'));
+    img.src = base64Str;
+  });
+}
+
+async function uploadBase64Image(base64Str, path) {
+  const maxDim = parseInt(document.getElementById('maxDim').value, 10) || 1600;
+  const quality = parseFloat(document.getElementById('jpegQuality').value) || 0.8;
+  const blob = await compressImage(base64Str, maxDim, quality);
+  const ref = newStorage.ref().child(path);
+  await ref.put(blob);
+  const url = await ref.getDownloadURL();
+  return { url, compressedSize: blob.size };
+}
+
+async function processDoc(docSnap, dryRun) {
+  const id = docSnap.id;
+  const data = docSnap.data();
+  let changed = 0;
+
+  if (Array.isArray(data.images)) {
+    const newImages = [];
+    for (let i = 0; i < data.images.length; i++) {
+      const val = data.images[i];
+      if (isBase64Image(val)) {
+        changed++;
+        const originalKB = Math.round(val.length / 1024);
+        if (dryRun) {
+          const maxDim = parseInt(document.getElementById('maxDim').value, 10) || 1600;
+          const quality = parseFloat(document.getElementById('jpegQuality').value) || 0.8;
+          // 試跑模式也實際壓縮一次（但不上傳），這樣可以看到真實的壓縮後大小
+          const blob = await compressImage(val, maxDim, quality);
+          const compressedKB = Math.round(blob.size / 1024);
+          newImages.push('[試跑] 原始 ' + originalKB + ' KB → 壓縮後約 ' + compressedKB + ' KB（不會上傳）');
+        } else {
+          const path = 'recipes/' + id + '/img_' + i + '.jpg';
+          const result = await uploadBase64Image(val, path);
+          log('    圖片 ' + i + ': ' + originalKB + ' KB → ' + Math.round(result.compressedSize / 1024) + ' KB');
+          newImages.push(result.url);
+        }
+      } else {
+        newImages.push(val);
+      }
+    }
+    data.images = newImages;
+  }
+
+  if (!dryRun) {
+    const colName = document.getElementById('collectionName').value.trim();
+    await newDb.collection(colName).doc(id).set(data);
+  }
+
+  return { id, changed };
+}
+
+async function runMigration(dryRun) {
+  const colName = document.getElementById('collectionName').value.trim();
+  document.getElementById('log').innerHTML = '';
+  log((dryRun ? '=== 試跑模式（不會寫入）===' : '=== 正式搬遷 ===') + ' 集合: ' + colName);
+
+  try {
+    const snap = await oldDb.collection(colName).get();
+    log('讀到 ' + snap.size + ' 份文件，開始處理...');
+
+    let successCount = 0, errorCount = 0;
+
+    for (const docSnap of snap.docs) {
+      try {
+        const result = await processDoc(docSnap, dryRun);
+        successCount++;
+        log('✓ ' + result.id + (result.changed ? '（轉換了 ' + result.changed + ' 張圖片）' : '（無圖片欄位需處理）'), 'ok');
+      } catch (e) {
+        errorCount++;
+        log('✗ ' + docSnap.id + ' 失敗: ' + e.message, 'err');
+      }
+    }
+
+    log('=== 完成: 成功 ' + successCount + '，失敗 ' + errorCount + ' ===');
+    if (!dryRun && errorCount === 0) {
+      log('全部寫入成功！記得回去把新專案的 Firestore / Storage 規則換回嚴格版本。', 'ok');
+    }
+  } catch (e) {
+    log('讀取來源集合失敗: ' + e.message, 'err');
+  }
+}
+
+document.getElementById('btnDryRun').onclick = () => runMigration(true);
+document.getElementById('btnRun').onclick = () => {
+  if (confirm('確定要正式寫入新資料庫嗎？這會覆蓋新資料庫裡同 ID 的文件。')) {
+    runMigration(false);
+  }
+};
+</script>
+
+</body>
+</html>
