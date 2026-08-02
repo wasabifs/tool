@@ -63,12 +63,19 @@ service cloud.firestore {
 <button id="btnDryRun">先試跑(不寫入,只看結果)</button>
 <button id="btnRun" disabled>正式搬遷(會寫入新資料庫)</button>
 
+<h2>4. 修正擁有者 uid(全部搬完後，最後做這步)</h2>
+<p style="font-size:13px;color:#aaa;">搬過去的文件，uid 欄位還是舊帳號的 uid，要改成新專案裡你目前的 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。</p>
+<div>要修正的集合名稱(逗號分開):</div>
+<input type="text" id="uidFixCollections" value="recipes,ingredients,mealPlans,shoppingList">
+<br>
+<button id="btnFixUid" disabled>批次修正 uid</button>
+
 <div id="log"></div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, query, where, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, query, where, getDocs, doc, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 let oldDb, newDb, oldUser, newUser, newStorage;
@@ -102,6 +109,7 @@ function parseConfig(id) {
 
 function checkReady() {
   document.getElementById('btnRun').disabled = !(oldUser && newUser);
+  document.getElementById('btnFixUid').disabled = !(oldUser && newUser);
 }
 
 document.getElementById('btnOldLogin').onclick = async () => {
@@ -265,6 +273,39 @@ document.getElementById('btnRun').onclick = () => {
   if (confirm('確定要正式寫入新資料庫嗎？這會覆蓋新資料庫裡同 ID 的文件。')) {
     runMigration(false);
   }
+};
+
+document.getElementById('btnFixUid').onclick = async () => {
+  const cols = document.getElementById('uidFixCollections').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!cols.length) { log('沒有填集合名稱', 'err'); return; }
+  if (!confirm('確定要把這些集合裡 uid 是舊帳號的文件，改成新帳號的 uid 嗎？（' + cols.join('、') + '）')) return;
+
+  document.getElementById('log').innerHTML = '';
+  log('=== 修正 uid: 舊 uid ' + oldUser.uid + ' → 新 uid ' + newUser.uid + ' ===');
+
+  for (const colName of cols) {
+    try {
+      const q = query(collection(newDb, colName), where('uid', '==', oldUser.uid));
+      const snap = await getDocs(q);
+      log(colName + ': 找到 ' + snap.size + ' 份需要修正的文件');
+      if (snap.size === 0) continue;
+
+      // Firestore 一個 batch 最多 500 筆，超過就分批
+      const docs = snap.docs;
+      for (let i = 0; i < docs.length; i += 400) {
+        const batch = writeBatch(newDb);
+        const chunk = docs.slice(i, i + 400);
+        for (const d of chunk) {
+          batch.update(doc(newDb, colName, d.id), { uid: newUser.uid });
+        }
+        await batch.commit();
+        log('  ✓ ' + colName + ' 已修正 ' + Math.min(i + 400, docs.length) + ' / ' + docs.length, 'ok');
+      }
+    } catch (e) {
+      log(colName + ' 修正失敗: ' + e.message, 'err');
+    }
+  }
+  log('=== uid 修正完成 ===', 'ok');
 };
 </script>
 
