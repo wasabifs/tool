@@ -68,7 +68,7 @@ service cloud.firestore {
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, query, where, getDocs, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 let oldDb, newDb, oldUser, newUser, newStorage;
@@ -234,7 +234,8 @@ async function runMigration(dryRun) {
   log((dryRun ? '=== 試跑模式（不會寫入）===' : '=== 正式搬遷 ===') + ' 集合: ' + colName);
 
   try {
-    const snap = await getDocs(collection(oldDb, colName));
+    const q = query(collection(oldDb, colName), where('uid', '==', oldUser.uid));
+    const snap = await getDocs(q);
     log('讀到 ' + snap.size + ' 份文件，開始處理...');
 
     let successCount = 0, errorCount = 0;
