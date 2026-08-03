@@ -14,7 +14,7 @@
   .status { font-size: 13px; margin-top: 6px; }
   .ok { color: #6fdc8c; }
   .err { color: #ff7b7b; }
-  #log { background:#000; color:#9be89b; padding:12px; height:320px; overflow-y:auto; font-family: monospace; font-size:12px; white-space: pre-wrap; border-radius:6px; margin-top:10px; }
+  #log { background:#000; color:#9be89b; padding:12px; height:320px; overflow-y:auto; font-family: monospace; font-size:12px; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; border-radius:6px; margin-top:10px; }
   .note { background:#2a2a15; border:1px solid #665; padding:10px; border-radius:6px; font-size:13px; margin:10px 0; }
 </style>
 </head>
@@ -83,6 +83,7 @@ service cloud.firestore {
 <br>
 <button id="btnStorageMigrate" disabled>開始搬遷 Storage</button>
 
+<button id="btnCopyLog" style="margin-top:10px;">複製完整記錄</button>
 <div id="log"></div>
 
 <script type="module">
@@ -101,6 +102,25 @@ function log(msg, cls) {
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
 }
+
+document.getElementById('btnCopyLog').onclick = async () => {
+  const text = document.getElementById('log').innerText;
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = document.getElementById('btnCopyLog');
+    const original = btn.textContent;
+    btn.textContent = '已複製！';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (e) {
+    // 剪貼簿權限被擋的話，退而求其次幫你全選起來，手動 Cmd/Ctrl+C
+    const range = document.createRange();
+    range.selectNodeContents(document.getElementById('log'));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    alert('自動複製被瀏覽器擋住了，記錄已經幫你全選起來，按 Cmd+C（Mac）或 Ctrl+C（Windows）複製即可。');
+  }
+};
 
 function parseConfig(id) {
   let raw = document.getElementById(id).value.trim();
