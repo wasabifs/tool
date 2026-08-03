@@ -64,7 +64,7 @@ service cloud.firestore {
 <button id="btnRun" disabled>正式搬遷(會寫入新資料庫)</button>
 
 <h2>4. 修正擁有者 uid(全部搬完後，最後做這步)</h2>
-<p style="font-size:13px;color:#aaa;">搬過去的文件，記錄擁有者的欄位還是舊帳號的 uid，要改成新專案裡實際在用的帳號 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。不同集合、甚至同一個集合裡，欄位名稱可能不一樣（例如 uid、buyerUid、createdBy），欄位名稱不同就要分開跑幾次。</p>
+<p style="font-size:13px;color:#aaa;">搬過去的文件，記錄擁有者的欄位還是舊帳號的 uid，要改成新專案裡實際在用的帳號 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。不同集合、甚至同一個集合裡，欄位名稱可能不一樣（例如 uid、buyerUid、createdBy），欄位名稱不同就要分開跑幾次。這裡填的集合名稱一律用「集合群組」方式查詢，所以不管是最上層的集合，還是藏在某份文件底下的子集合（例如 geckos/xxx/equipment），都找得到。</p>
 <div>要修正的集合名稱(逗號分開):</div>
 <input type="text" id="uidFixCollections" value="recipes,ingredients,mealPlans,shoppingList">
 <div style="margin-top:12px;">要比對/修改的欄位名稱(例如 uid、buyerUid、createdBy):</div>
@@ -88,7 +88,7 @@ service cloud.firestore {
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, collection, query, where, getDocs, doc, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, collectionGroup, query, where, getDocs, doc, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getStorage, ref, uploadBytes, getBytes, getDownloadURL, listAll } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
 let oldDb, newDb, oldUser, newUser, newStorage, oldStorage;
@@ -308,7 +308,7 @@ document.getElementById('btnFixUid').onclick = async () => {
 
   for (const colName of cols) {
     try {
-      const q = query(collection(newDb, colName), where(fieldName, '==', sourceUid));
+      const q = query(collectionGroup(newDb, colName), where(fieldName, '==', sourceUid));
       const snap = await getDocs(q);
       log(colName + ': 找到 ' + snap.size + ' 份需要修正的文件');
       if (snap.size === 0) continue;
@@ -319,7 +319,7 @@ document.getElementById('btnFixUid').onclick = async () => {
         const batch = writeBatch(newDb);
         const chunk = docs.slice(i, i + 400);
         for (const d of chunk) {
-          batch.update(doc(newDb, colName, d.id), { [fieldName]: targetUid });
+          batch.update(d.ref, { [fieldName]: targetUid });
         }
         await batch.commit();
         log('  ✓ ' + colName + ' 已修正 ' + Math.min(i + 400, docs.length) + ' / ' + docs.length, 'ok');
