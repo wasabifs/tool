@@ -64,7 +64,7 @@ service cloud.firestore {
 <button id="btnRun" disabled>正式搬遷(會寫入新資料庫)</button>
 
 <h2>4. 修正擁有者 uid(全部搬完後，最後做這步)</h2>
-<p style="font-size:13px;color:#aaa;">搬過去的文件，記錄擁有者的欄位還是舊帳號的 uid，要改成新專案裡實際在用的帳號 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。不同集合、甚至同一個集合裡，欄位名稱可能不一樣（例如 uid、buyerUid、createdBy），欄位名稱不同就要分開跑幾次。集合名稱填「純名稱」（例如 equipment）會用集合群組方式查詢所有守宮底下同名子集合，需要另外開啟集合群組索引；如果只有一隻守宮、想避開索引設定，可以直接填「完整路徑」（例如 geckos/你的守宮文件ID/equipment），這樣是直接查那個確切位置，不需要額外建索引。</p>
+<p style="font-size:13px;color:#aaa;">搬過去的文件，記錄擁有者的欄位還是舊帳號的 uid，要改成新專案裡實際在用的帳號 uid，資料才能被正常讀到。這一步只動<b>新資料庫</b>，不會碰舊專案。可以跑好幾個集合，用逗號分開。不同集合、甚至同一個集合裡，欄位名稱可能不一樣（例如 uid、buyerUid、createdBy），欄位名稱不同就要分開跑幾次。集合名稱預設當作一般集合查詢，不需要額外建索引：填「geckos」查最上層集合，填「geckos/你的守宮文件ID/equipment」查巢狀子集合。只有要跨所有守宮一起查同名子集合時，才在名稱前面加「cg:」（例如 cg:equipment），這種才需要另外建立集合群組索引。</p>
 <div>要修正的集合名稱(逗號分開):</div>
 <input type="text" id="uidFixCollections" value="recipes,ingredients,mealPlans,shoppingList">
 <div style="margin-top:12px;">要比對/修改的欄位名稱(例如 uid、buyerUid、createdBy):</div>
@@ -76,12 +76,25 @@ service cloud.firestore {
 <br>
 <button id="btnFixUid" disabled>批次修正 uid</button>
 
+<h2>4.5 修正舊專案 Storage 的 CORS(如果第 5 步搬遷檔案一直失敗 retry-limit-exceeded，先做這步)</h2>
+<p style="font-size:13px;color:#aaa;">如果從舊專案下載檔案一直失敗，很可能是舊 Storage bucket 沒有允許這個網頁的網域讀取（CORS 設定）。這個按鈕會直接呼叫 Google API 幫你加上允許目前這個網頁網域的設定，不用碰指令列。要先登入舊專案（第 1 步），且登入的帳號要對舊專案有 Storage 管理員權限。</p>
+<button id="btnFixCors" disabled>修正舊 Storage 的 CORS 設定</button>
+
 <h2>5. Storage 檔案搬遷(把舊專案 Storage 的檔案，複製到新專案)</h2>
 <p style="font-size:13px;color:#aaa;">會把舊專案 Storage 裡指定路徑底下的所有檔案（含子資料夾），原封不動複製到新專案 Storage 的同樣路徑。只是複製，不會刪除舊的檔案。</p>
 <div>來源路徑(留空代表整個 bucket 最上層都搬，例如只想搬某個資料夾就填 avatars):</div>
 <input type="text" id="storagePrefix" value="">
 <br>
 <button id="btnStorageMigrate" disabled>開始搬遷 Storage</button>
+
+<h2>6. 修正照片網址(Storage 搬完後，最後做這步)</h2>
+<p style="font-size:13px;color:#aaa;">Firestore 文件裡如果有欄位存著指向舊專案 Storage 的完整網址（例如 photoUrl），檔案搬完後這裡的網址還是舊的，要重新產生指向新專案的網址並寫回去。這一步只會處理「網址開頭是舊專案 bucket」的欄位，已經是新網址的會自動跳過。集合名稱一樣支援純名稱（最上層集合）、斜線路徑（巢狀子集合）、或 cg: 開頭（集合群組）。</p>
+<div>要修正的集合名稱(逗號分開):</div>
+<input type="text" id="urlFixCollections" value="photos">
+<div style="margin-top:12px;">要修正的欄位名稱(例如 photoUrl、avatarUrl，逗號分開可以一次修多個欄位):</div>
+<input type="text" id="urlFixFields" value="photoUrl">
+<br>
+<button id="btnFixUrl" disabled>批次修正照片網址</button>
 
 <button id="btnCopyLog" style="margin-top:10px;">複製完整記錄</button>
 <div id="log"></div>
@@ -92,7 +105,7 @@ import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstati
 import { getFirestore, collection, collectionGroup, query, where, getDocs, doc, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getStorage, ref, uploadBytes, getBytes, getDownloadURL, listAll } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
-let oldDb, newDb, oldUser, newUser, newStorage, oldStorage;
+let oldDb, newDb, oldUser, newUser, newStorage, oldStorage, oldAccessToken;
 
 function log(msg, cls) {
   const el = document.getElementById('log');
@@ -140,10 +153,19 @@ function parseConfig(id) {
   }
 }
 
+function resolveColRef(db, colName) {
+  if (colName.startsWith('cg:')) {
+    return collectionGroup(db, colName.slice(3));
+  }
+  return collection(db, ...colName.split('/').filter(Boolean));
+}
+
 function checkReady() {
   document.getElementById('btnRun').disabled = !(oldUser && newUser);
   document.getElementById('btnFixUid').disabled = !(oldUser && newUser);
   document.getElementById('btnStorageMigrate').disabled = !(oldUser && newUser);
+  document.getElementById('btnFixCors').disabled = !oldUser;
+  document.getElementById('btnFixUrl').disabled = !(oldUser && newUser);
 }
 
 document.getElementById('btnOldLogin').onclick = async () => {
@@ -155,11 +177,18 @@ document.getElementById('btnOldLogin').onclick = async () => {
     oldStorage = getStorage(app);
     const auth = getAuth(app);
     const provider = new GoogleAuthProvider();
+    // 多要一個 Storage 管理權限的授權範圍，這樣才能在網頁上直接呼叫 API 設定 CORS，不用碰指令列
+    provider.addScope('https://www.googleapis.com/auth/devstorage.full_control');
     const result = await signInWithPopup(auth, provider);
     oldUser = result.user;
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    oldAccessToken = credential ? credential.accessToken : null;
     document.getElementById('oldStatus').textContent = '已登入: ' + oldUser.email + '（資料庫: ' + dbId + '）';
     document.getElementById('oldStatus').className = 'status ok';
     log('舊專案登入成功: ' + oldUser.email + '，資料庫 ID: ' + dbId);
+    if (!oldAccessToken) {
+      log('提醒: 沒有拿到 Storage 管理權限的 access token，CORS 修正功能可能無法使用', 'err');
+    }
     const sourceUidInput = document.getElementById('sourceUid');
     if (!sourceUidInput.value) sourceUidInput.value = oldUser.uid;
     checkReady();
@@ -328,12 +357,16 @@ document.getElementById('btnFixUid').onclick = async () => {
 
   for (const colName of cols) {
     try {
-      // 如果填的是完整路徑（含斜線，例如 geckos/petId/equipment），
-      // 直接查那個確切位置的子集合，不用集合群組、也不用額外建索引。
-      // 沒有斜線才當作集合群組名稱，跨所有父層一起查。
-      const colRef = colName.includes('/')
-        ? collection(newDb, ...colName.split('/').filter(Boolean))
-        : collectionGroup(newDb, colName);
+      // 預設一律用「一般集合查詢」（不需要額外索引），支援用斜線指定巢狀路徑，
+      // 例如頂層集合 geckos，或巢狀路徑 geckos/petId/equipment。
+      // 只有在名稱前面加 "cg:" 時，才會改用「集合群組」查詢
+      // （跨所有同名子集合一起查，例如同時查好幾隻守宮底下的 equipment，這種才需要另外建索引）。
+      let colRef;
+      if (colName.startsWith('cg:')) {
+        colRef = collectionGroup(newDb, colName.slice(3));
+      } else {
+        colRef = collection(newDb, ...colName.split('/').filter(Boolean));
+      }
       const q = query(colRef, where(fieldName, '==', sourceUid));
       const snap = await getDocs(q);
       log(colName + ': 找到 ' + snap.size + ' 份需要修正的文件');
@@ -377,6 +410,124 @@ async function copyStoragePath(path, stats) {
     await copyStoragePath(subPrefix.fullPath, stats);
   }
 }
+
+document.getElementById('btnFixUrl').onclick = async () => {
+  const cols = document.getElementById('urlFixCollections').value.split(',').map(s => s.trim()).filter(Boolean);
+  const fields = document.getElementById('urlFixFields').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!cols.length || !fields.length) { log('集合名稱 / 欄位名稱不能空白', 'err'); return; }
+
+  let oldBucket;
+  try {
+    const cfg = parseConfig('oldConfig');
+    oldBucket = cfg.storageBucket;
+  } catch (e) {
+    log('讀取舊專案 storageBucket 失敗: ' + e.message, 'err');
+    return;
+  }
+  if (!confirm('確定要掃描這些集合（' + cols.join('、') + '），把欄位（' + fields.join('、') + '）裡指向舊 bucket 的網址，換成新專案的網址嗎？')) return;
+
+  document.getElementById('log').innerHTML = '';
+  log('=== 修正照片網址: 舊 bucket=' + oldBucket + ' ===');
+
+  for (const colName of cols) {
+    try {
+      const colRef = resolveColRef(newDb, colName);
+      const snap = await getDocs(colRef);
+      log(colName + ': 共 ' + snap.size + ' 份文件，開始檢查...');
+
+      let changed = 0, skipped = 0, failed = 0;
+
+      for (const d of snap.docs) {
+        const data = d.data();
+        const updates = {};
+        let needUpdate = false;
+
+        for (const fieldName of fields) {
+          const val = data[fieldName];
+          if (typeof val !== 'string' || !val.includes(oldBucket)) continue;
+
+          try {
+            const urlObj = new URL(val);
+            // 網址格式: /v0/b/BUCKET/o/ENCODED_PATH
+            const match = urlObj.pathname.match(/\/o\/(.+)$/);
+            if (!match) { failed++; continue; }
+            const storagePath = decodeURIComponent(match[1]);
+            const newUrl = await getDownloadURL(ref(newStorage, storagePath));
+            updates[fieldName] = newUrl;
+            needUpdate = true;
+          } catch (e) {
+            failed++;
+            log('  ✗ ' + d.id + ' 的 ' + fieldName + ' 處理失敗: ' + e.message, 'err');
+          }
+        }
+
+        if (needUpdate) {
+          await setDoc(d.ref, updates, { merge: true });
+          changed++;
+        } else {
+          skipped++;
+        }
+      }
+
+      log('  ✓ ' + colName + ' 完成：更新 ' + changed + '，跳過(已是新網址或無此欄位) ' + skipped + '，失敗 ' + failed, 'ok');
+    } catch (e) {
+      log(colName + ' 處理失敗: ' + e.message, 'err');
+    }
+  }
+  log('=== 網址修正完成 ===', 'ok');
+};
+
+document.getElementById('btnFixCors').onclick = async () => {
+  if (!oldAccessToken) {
+    log('沒有 Storage 管理權限的 access token，請先在第 1 步重新登入舊專案（登出後再登入一次，確保有跳出同意 Storage 權限的畫面）', 'err');
+    return;
+  }
+  let bucketName;
+  try {
+    const cfg = parseConfig('oldConfig');
+    bucketName = cfg.storageBucket;
+    if (!bucketName) throw new Error('config 裡沒有 storageBucket 欄位');
+  } catch (e) {
+    log('讀取舊專案 storageBucket 失敗: ' + e.message, 'err');
+    return;
+  }
+
+  const origin = window.location.origin;
+  if (!confirm('確定要把 bucket "' + bucketName + '" 的 CORS 設定改成允許來自 "' + origin + '" 的請求嗎？')) return;
+
+  document.getElementById('log').innerHTML = '';
+  log('=== 修正 CORS: bucket=' + bucketName + '，允許來源=' + origin + ' ===');
+
+  try {
+    const res = await fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucketName), {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer ' + oldAccessToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        cors: [
+          {
+            origin: [origin],
+            method: ['GET', 'HEAD', 'OPTIONS'],
+            responseHeader: ['Content-Type', 'Authorization', 'Content-Length', 'x-goog-*'],
+            maxAgeSeconds: 3600
+          }
+        ]
+      })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error('HTTP ' + res.status + ': ' + errText);
+    }
+
+    log('=== CORS 設定成功！可以回到「5. Storage 檔案搬遷」重新試一次了 ===', 'ok');
+  } catch (e) {
+    log('CORS 設定失敗: ' + e.message, 'err');
+    log('常見原因: 登入的帳號對這個 bucket 沒有 Storage 管理員權限，或是第 1 步登入時沒有同意 Storage 授權範圍', 'err');
+  }
+};
 
 document.getElementById('btnStorageMigrate').onclick = async () => {
   const prefix = document.getElementById('storagePrefix').value.trim();
